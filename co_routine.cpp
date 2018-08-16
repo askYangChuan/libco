@@ -19,6 +19,7 @@
 #include "co_routine.h"
 #include "co_routine_inner.h"
 #include "co_epoll.h"
+#include "co_routine_pool.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -55,8 +56,8 @@ struct stCoRoutineEnv_t
 	stCoEpoll_t *pEpoll;
 
 	//for copy stack log lastco and nextco
-	stCoRoutine_t* pending_co;
-	stCoRoutine_t* occupy_co;
+	stCoRoutine_t* pending_co;		/* 共享栈模式中保存这次用共享栈的被唤醒协程 */
+	stCoRoutine_t* occupy_co;		/* 共享栈模式中上次用分配共享栈的协程，协程可能已经被回收，但是这里不要设置为NULL */
 };
 //int socket(int domain, int type, int protocol);
 void co_log_err( const char *fmt,... )
@@ -451,6 +452,8 @@ static int CoRoutineFunc( stCoRoutine_t *co,void * )
 
 	stCoRoutineEnv_t *env = co->env;
 
+	stCoRoutine_release(co);
+
 	co_yield_env( env );
 
 	return 0;
@@ -482,7 +485,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 		at.stack_size += 0x1000;
 	}
 
-	stCoRoutine_t *lp = (stCoRoutine_t*)malloc( sizeof(stCoRoutine_t) );
+	stCoRoutine_t *lp = stCoRoutine_alloc();
 	
 	memset( lp,0,(long)(sizeof(stCoRoutine_t))); 
 
@@ -528,18 +531,47 @@ int co_create( stCoRoutine_t **ppco,const stCoRoutineAttr_t *attr,pfn_co_routine
 	*ppco = co;
 	return 0;
 }
-void co_free( stCoRoutine_t *co )
+
+void co_release( stCoRoutine_t *co )
 {
+
     if (!co->cIsShareStack) 
     {    
         free(co->stack_mem->stack_buffer);
         free(co->stack_mem);
-    }   
-    free( co );
+		co->stack_mem = NULL;
+    }else {
+		if(co->save_buffer) {
+			free(co->save_buffer);
+			co->save_buffer = NULL;
+		}
+
+		/* 这里可以不用将occupy_co给设置为NULL，如果要设置为NULL，就必须修改co_swap判断是否需要拷贝栈的逻辑，将occupy_co是否为NULL的判断去掉 */
+#if 1		
+		if(co->env->occupy_co == co) {
+			co->env->occupy_co = NULL; 
+		}
+		if(co->stack_mem->occupy_co == co) {
+			co->stack_mem->occupy_co = NULL;
+		}
+#endif		
+	}
+
+	if(co->pvEnv) {
+		if(co->pvEnv_free) {
+			co->pvEnv_free(co->pvEnv);
+			co->pvEnv_free = NULL;
+		}else {
+			free(co->pvEnv);
+		}
+		co->pvEnv = NULL;
+	}	
 }
-void co_release( stCoRoutine_t *co )
+
+void co_free( stCoRoutine_t *co )
 {
-    co_free( co );
+	co_release(co);
+    free( co );
 }
 
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co);
@@ -583,7 +615,7 @@ void save_stack_buffer(stCoRoutine_t* occupy_co)
 {
 	///copy out
 	stStackMem_t* stack_mem = occupy_co->stack_mem;
-	int len = stack_mem->stack_bp - occupy_co->stack_sp;
+	int len = stack_mem->stack_bp - occupy_co->stack_sp;		/* 获取栈大小 */
 
 	if (occupy_co->save_buffer)
 	{
@@ -602,7 +634,7 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 
 	//get curr stack sp
 	char c;
-	curr->stack_sp= &c;
+	curr->stack_sp= &c;			/* 当前协程的栈顶指针，用于还原 */
 
 	if (!pending_co->cIsShareStack)
 	{
@@ -615,25 +647,26 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 		//get last occupy co on the same stack mem
 		stCoRoutine_t* occupy_co = pending_co->stack_mem->occupy_co;
 		//set pending co to occupy thest stack mem;
-		pending_co->stack_mem->occupy_co = pending_co;
+		pending_co->stack_mem->occupy_co = pending_co;		/* 设置当前使用该栈的协程为自己 */
 
 		env->occupy_co = occupy_co;
-		if (occupy_co && occupy_co != pending_co)
+		if (occupy_co && occupy_co != pending_co)		/* 当前协程和上次用该栈的协程不一样需要保存栈 */
 		{
 			save_stack_buffer(occupy_co);
 		}
 	}
 
-	//swap context
-	coctx_swap(&(curr->ctx),&(pending_co->ctx) );
+	/* 这里调用汇编coctx_swap，保存了当前协程的寄存器到reg，并且保存了co_swap的coctx_swap的地址用于返回。后面的代码是当前协程(pending_co)被唤醒后执行的 */
 
+	//swap context
+	coctx_swap(&(curr->ctx),&(pending_co->ctx) );	
 	//stack buffer may be overwrite, so get again;
-	stCoRoutineEnv_t* curr_env = co_get_curr_thread_env();
-	stCoRoutine_t* update_occupy_co =  curr_env->occupy_co;
-	stCoRoutine_t* update_pending_co = curr_env->pending_co;
+	stCoRoutineEnv_t* curr_env = co_get_curr_thread_env();		/* 这里重新获取curr_env而不用env的原因是因为栈可能被覆盖了，恢复后需要重新获取 */
+	stCoRoutine_t* update_occupy_co =  curr_env->occupy_co;		/* 上次用了共享栈的线程，如果存在，则需要判断是否需要还原栈(上次协程即使回收了也不要置为NULL) */
+	stCoRoutine_t* update_pending_co = curr_env->pending_co;	/* pending_co是当前要运行的协程，需要还原栈 */
 	
-	if (update_occupy_co && update_pending_co && update_occupy_co != update_pending_co)
-	{
+	if (update_pending_co && update_occupy_co != update_pending_co)
+	{	/* 如果是共享栈模式，则需要将栈给恢复过来 */
 		//resume stack buffer
 		if (update_pending_co->save_buffer && update_pending_co->save_size > 0)
 		{
@@ -746,9 +779,9 @@ void OnPollPreparePfn( stTimeoutItem_t * ap,struct epoll_event &e,stTimeoutItemL
 	{
 		pPoll->iAllEventDetach = 1;
 
-		RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( pPoll );
+		RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( pPoll );	/* 取消poll或co_poll的超时定时器，因为会自己唤醒 */
 
-		AddTail( active,pPoll );
+		AddTail( active,pPoll );		/* 将poll加入到active中 */
 
 	}
 }
@@ -777,7 +810,7 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 			stTimeoutItem_t *item = (stTimeoutItem_t*)result->events[i].data.ptr;
 			if( item->pfnPrepare )
 			{
-				item->pfnPrepare( item,result->events[i],active );
+				item->pfnPrepare( item,result->events[i],active );		/* 一般用于重载的poll函数里面将poll超时函数给取消，并给pollfd赋值 */
 			}
 			else
 			{
@@ -806,7 +839,7 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 			PopHead<stTimeoutItem_t,stTimeoutItemLink_t>( active );
             if (lp->bTimeout && now < lp->ullExpireTime) 
 			{
-				int ret = AddTimeout(ctx->pTimeout, lp, now);
+				int ret = AddTimeout(ctx->pTimeout, lp, now);	/* 超过60s的定时器实际未到期，需要重新加入时间轮盘里面 */
 				if (!ret) 
 				{
 					lp->bTimeout = false;
@@ -925,7 +958,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 
 		if( fds[i].fd > -1 )
 		{
-			ev.data.ptr = arg.pPollItems + i;
+			ev.data.ptr = arg.pPollItems + i;		/* 用于epoll_wait回调 */
 			ev.events = PollEvent2Epoll( fds[i].events );
 
 			int ret = co_epoll_ctl( epfd,EPOLL_CTL_ADD, fds[i].fd, &ev );
@@ -960,7 +993,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 	}
     else
 	{
-		co_yield_env( co_get_curr_thread_env() );
+		co_yield_env( co_get_curr_thread_env() );	/* 切换协程并等到超时或者某个fd可用 */
 		iRaiseCnt = arg.iRaiseCnt;
 	}
 
@@ -1090,7 +1123,7 @@ int co_cond_signal( stCoCond_t *si )
 	}
 	RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( &sp->timeout );
 
-	AddTail( co_get_curr_thread_env()->pEpoll->pstActiveList,&sp->timeout );
+	AddTail( co_get_curr_thread_env()->pEpoll->pstActiveList,&sp->timeout );	
 
 	return 0;
 }
@@ -1101,9 +1134,9 @@ int co_cond_broadcast( stCoCond_t *si )
 		stCoCondItem_t * sp = co_cond_pop( si );
 		if( !sp ) return 0;
 
-		RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( &sp->timeout );
+		RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( &sp->timeout );	/* 如果co_cond_timedwait定义了超时，这里取消超时定时器 */
 
-		AddTail( co_get_curr_thread_env()->pEpoll->pstActiveList,&sp->timeout );
+		AddTail( co_get_curr_thread_env()->pEpoll->pstActiveList,&sp->timeout );	/* 加入到唤醒链表 */
 	}
 
 	return 0;

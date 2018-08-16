@@ -26,19 +26,20 @@ include co.mk
 ########## options ##########
 CFLAGS += -g -fno-strict-aliasing -O2 -Wall -export-dynamic \
 	-Wall -pipe  -D_GNU_SOURCE -D_REENTRANT -fPIC -Wno-deprecated -m64
-
+ 
 UNAME := $(shell uname -s)
 
 ifeq ($(UNAME), FreeBSD)
 LINKS += -g -L./lib -lcolib -lpthread
 else
-LINKS += -g -L./lib -lcolib -lpthread -ldl
+LINKS += -g -L./lib -lcolib -lpthread -ldl -L/usr/lib64/mysql -lmysqlclient
 endif
 
-COLIB_OBJS=co_epoll.o co_routine.o co_hook_sys_call.o coctx_swap.o coctx.o
+COLIB_OBJS=co_epoll.o co_routine.o co_hook_sys_call.o coctx_swap.o coctx.o co_routine_pool.o
 #co_swapcontext.o
 
-PROGS = colib example_poll example_echosvr example_echocli example_thread  example_cond example_specific example_copystack example_closure
+#PROGS = colib example_poll example_echosvr example_echocli example_thread  example_cond example_specific example_copystack example_closure example_mysql
+PROGS = colib example_test example_mysql
 
 all:$(PROGS)
 
@@ -68,6 +69,10 @@ example_copystack:example_copystack.o
 example_setenv:example_setenv.o
 	$(BUILDEXE)
 example_closure:example_closure.o
+	$(BUILDEXE)
+example_mysql:example_mysql.o db_tool.o ini_file.o
+	$(BUILDEXE)
+example_test:example_test.o db_tool.o ini_file.o
 	$(BUILDEXE)
 
 dist: clean libco-$(version).src.tar.gz

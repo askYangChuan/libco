@@ -98,6 +98,8 @@ void AddFailCnt()
 	}
 }
 
+#define	TCP_NORMAL_ERR(e)	((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
+
 static void *readwrite_routine( void *arg )
 {
 
@@ -151,12 +153,15 @@ static void *readwrite_routine( void *arg )
 		
 		ret = write( fd,str, 8);
 		if ( ret > 0 )
-		{
+		{	printf("write ok\n");
 			ret = read( fd,buf, sizeof(buf) );
 			if ( ret <= 0 )
 			{
-				//printf("co %p read ret %d errno %d (%s)\n",
-				//		co_self(), ret,errno,strerror(errno));
+				if(TCP_NORMAL_ERR(errno)) {
+					printf("this %d,%d, %d\n", EINTR ,EAGAIN , EWOULDBLOCK);
+				}
+				printf("co %p read ret %d errno %d (%s)\n",
+						co_self(), ret,errno,strerror(errno));
 				close(fd);
 				fd = -1;
 				AddFailCnt();
@@ -191,28 +196,17 @@ int main(int argc,char *argv[])
 	sa.sa_handler = SIG_IGN;
 	sigaction( SIGPIPE, &sa, NULL );
 	
-	for(int k=0;k<proccnt;k++)
+	for(int k=0;k<1;k++)
 	{
 
-		pid_t pid = fork();
-		if( pid > 0 )
-		{
-			continue;
-		}
-		else if( pid < 0 )
-		{
-			break;
-		}
-		for(int i=0;i<cnt;i++)
-		{
-			stCoRoutine_t *co = 0;
-			co_create( &co,NULL,readwrite_routine, &endpoint);
-			co_resume( co );
-		}
+		stCoRoutine_t *co = 0;
+		co_create( &co,NULL,readwrite_routine, &endpoint);
+		co_resume( co );
 		co_eventloop( co_get_epoll_ct(),0,0 );
 
 		exit(0);
 	}
+	printf("father is over\n");
 	return 0;
 }
 /*./example_echosvr 127.0.0.1 10000 100 50*/

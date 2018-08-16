@@ -119,12 +119,12 @@ int coctx_make( coctx_t *ctx,coctx_pfn_t pfn,const void *s,const void *s1 )
 
 	memset(ctx->regs, 0, sizeof(ctx->regs));
 
-	ctx->regs[ kRSP ] = sp - 8;
+	ctx->regs[ kRSP ] = sp - 8;				/* 栈顶指针空出8个字节保留（函数调用原理中子函数会在这里存父函数的%rbp） */
 
-	ctx->regs[ kRETAddr] = (char*)pfn;
+	ctx->regs[ kRETAddr] = (char*)pfn;		/* 提供给汇编指令ret使用的返回地址 */
 
-	ctx->regs[ kRDI ] = (char*)s;
-	ctx->regs[ kRSI ] = (char*)s1;
+	ctx->regs[ kRDI ] = (char*)s;			/* 函数调用原理中%rdi是父函数放的第一个参数 */
+	ctx->regs[ kRSI ] = (char*)s1;			/* 函数调用原理中%rdi是父函数放的第二个参数 */
 	return 0;
 }
 

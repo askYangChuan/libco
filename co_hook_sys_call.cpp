@@ -47,6 +47,9 @@
 
 typedef long long ll64_t;
 
+#define	TCP_NORMAL_ERR(e)	((e) == EINTR || (e) == EAGAIN || (e) == EWOULDBLOCK)
+
+
 struct rpchook_t
 {
 	int user_flag;
@@ -213,6 +216,7 @@ static inline void free_by_fd( int fd )
 	return;
 
 }
+
 int socket(int domain, int type, int protocol)
 {
 	HOOK_SYS_FUNC( socket );
@@ -330,6 +334,44 @@ int close(int fd)
 ssize_t read( int fd, void *buf, size_t nbyte )
 {
 	HOOK_SYS_FUNC( read );
+
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_read_func( fd,buf,nbyte );
+	}
+	rpchook_t *lp = get_by_fd( fd );
+
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) ) 
+	{
+		ssize_t ret = g_sys_read_func( fd,buf,nbyte );
+		return ret;
+	}
+	int timeout = ( lp->read_timeout.tv_sec * 1000 ) 
+				+ ( lp->read_timeout.tv_usec / 1000 );
+	for(;;) {
+		struct pollfd pf = { 0 };
+		pf.fd = fd;
+		pf.events = ( POLLIN | POLLERR | POLLHUP );
+
+		int pollret = poll( &pf,1,timeout );
+
+		ssize_t readret = g_sys_read_func( fd,(char*)buf ,nbyte );
+		if( readret < 0 )
+		{
+			if(TCP_NORMAL_ERR(errno)) {
+				continue;
+			}
+			co_log_err("CO_ERR: read fd %d ret %ld errno %d poll ret %d timeout %d",
+						fd,readret,errno,pollret,timeout);
+		}
+
+		return readret;			
+	}
+
+}
+ssize_t read1( int fd, void *buf, size_t nbyte )
+{
+	HOOK_SYS_FUNC( read );
 	
 	if( !co_is_enable_sys_hook() )
 	{
@@ -362,17 +404,18 @@ ssize_t read( int fd, void *buf, size_t nbyte )
 	return readret;
 	
 }
+
 ssize_t write( int fd, const void *buf, size_t nbyte )
 {
 	HOOK_SYS_FUNC( write );
-	
+
 	if( !co_is_enable_sys_hook() )
 	{
 		return g_sys_write_func( fd,buf,nbyte );
 	}
 	rpchook_t *lp = get_by_fd( fd );
 
-	if( !lp || ( O_NONBLOCK & lp->user_flag ) )
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) )	/* 其实所有的socket都是非阻塞的，只不过user_flag只记录了原来这个设备是否是阻塞的 */
 	{
 		ssize_t ret = g_sys_write_func( fd,buf,nbyte );
 		return ret;
@@ -394,20 +437,74 @@ ssize_t write( int fd, const void *buf, size_t nbyte )
 	}
 	while( wrotelen < nbyte )
 	{
-
 		struct pollfd pf = { 0 };
 		pf.fd = fd;
 		pf.events = ( POLLOUT | POLLERR | POLLHUP );
 		poll( &pf,1,timeout );
 
-		writeret = g_sys_write_func( fd,(const char*)buf + wrotelen,nbyte - wrotelen );
-		
+		writeret = g_sys_write_func( fd,(const char*)buf + wrotelen,nbyte - wrotelen );	/* 这个其实是非阻塞的socket */
+		if( writeret <= 0 )
+		{
+			if(writeret < 0 && TCP_NORMAL_ERR(errno)) {
+				continue;
+			}
+			break;
+		}
+		wrotelen += writeret ;
+	}
+	
+	if (writeret <= 0 && wrotelen == 0)
+	{
+		return writeret;
+	}
+	return wrotelen;
+}
+
+ssize_t write1( int fd, const void *buf, size_t nbyte )
+{
+	HOOK_SYS_FUNC( write );
+	
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_write_func( fd,buf,nbyte );
+	}
+	rpchook_t *lp = get_by_fd( fd );
+
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) )	/* 其实所有的socket都是非阻塞的，只不过user_flag只记录了原来这个设备是否是阻塞的 */
+	{
+		ssize_t ret = g_sys_write_func( fd,buf,nbyte );
+		return ret;
+	}
+	size_t wrotelen = 0;
+	int timeout = ( lp->write_timeout.tv_sec * 1000 ) 
+				+ ( lp->write_timeout.tv_usec / 1000 );
+
+	ssize_t writeret = g_sys_write_func( fd,(const char*)buf + wrotelen,nbyte - wrotelen );
+
+	if (writeret == 0)
+	{
+		return writeret;
+	}
+
+	if( writeret > 0 )
+	{
+		wrotelen += writeret;	
+	}
+	while( wrotelen < nbyte )
+	{
+		struct pollfd pf = { 0 };
+		pf.fd = fd;
+		pf.events = ( POLLOUT | POLLERR | POLLHUP );
+		poll( &pf,1,timeout );
+
+		writeret = g_sys_write_func( fd,(const char*)buf + wrotelen,nbyte - wrotelen );	/* 这个其实是非阻塞的socket */
 		if( writeret <= 0 )
 		{
 			break;
 		}
 		wrotelen += writeret ;
 	}
+	
 	if (writeret <= 0 && wrotelen == 0)
 	{
 		return writeret;
@@ -416,6 +513,49 @@ ssize_t write( int fd, const void *buf, size_t nbyte )
 }
 
 ssize_t sendto(int socket, const void *message, size_t length,
+	                 int flags, const struct sockaddr *dest_addr,
+					               socklen_t dest_len)
+{
+	/*
+		1.no enable sys call ? sys
+		2.( !lp || lp is non block ) ? sys
+		3.try
+		4.wait
+		5.try
+	*/
+	HOOK_SYS_FUNC( sendto );
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_sendto_func( socket,message,length,flags,dest_addr,dest_len );
+	}
+
+	rpchook_t *lp = get_by_fd( socket );
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) )
+	{
+		return g_sys_sendto_func( socket,message,length,flags,dest_addr,dest_len );
+	}
+
+	for(;;) {
+		ssize_t ret = g_sys_sendto_func( socket,message,length,flags,dest_addr,dest_len );
+		if( ret < 0 && EAGAIN == errno )
+		{
+			int timeout = ( lp->write_timeout.tv_sec * 1000 ) 
+						+ ( lp->write_timeout.tv_usec / 1000 );
+
+
+			struct pollfd pf = { 0 };
+			pf.fd = socket;
+			pf.events = ( POLLOUT | POLLERR | POLLHUP );
+			poll( &pf,1,timeout );
+
+			continue;
+			//ret = g_sys_sendto_func( socket,message,length,flags,dest_addr,dest_len );
+		}
+		return ret;
+	}
+}
+
+ssize_t sendto1(int socket, const void *message, size_t length,
 	                 int flags, const struct sockaddr *dest_addr,
 					               socklen_t dest_len)
 {
@@ -457,6 +597,39 @@ ssize_t sendto(int socket, const void *message, size_t length,
 }
 
 ssize_t recvfrom(int socket, void *buffer, size_t length,
+	                 int flags, struct sockaddr *address,
+					               socklen_t *address_len)
+{
+	HOOK_SYS_FUNC( recvfrom );
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_recvfrom_func( socket,buffer,length,flags,address,address_len );
+	}
+
+	rpchook_t *lp = get_by_fd( socket );
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) )
+	{
+		return g_sys_recvfrom_func( socket,buffer,length,flags,address,address_len );
+	}
+
+	int timeout = ( lp->read_timeout.tv_sec * 1000 ) 
+				+ ( lp->read_timeout.tv_usec / 1000 );
+
+	for(;;) {
+		struct pollfd pf = { 0 };
+		pf.fd = socket;
+		pf.events = ( POLLIN | POLLERR | POLLHUP );
+		poll( &pf,1,timeout );
+
+		ssize_t ret = g_sys_recvfrom_func( socket,buffer,length,flags,address,address_len );
+		if(ret < 0 && TCP_NORMAL_ERR(errno)) {
+			continue;
+		}
+		return ret;
+	} 
+}
+
+ssize_t recvfrom1(int socket, void *buffer, size_t length,
 	                 int flags, struct sockaddr *address,
 					               socklen_t *address_len)
 {
@@ -525,6 +698,60 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags)
 		
 		if( writeret <= 0 )
 		{
+			if(writeret < 0 && TCP_NORMAL_ERR(errno)) {
+				continue;
+			}
+			break;
+		}
+		wrotelen += writeret ;
+	}
+	if (writeret <= 0 && wrotelen == 0)
+	{
+		return writeret;
+	}
+	return wrotelen;
+}
+
+ssize_t send1(int socket, const void *buffer, size_t length, int flags)
+{
+	HOOK_SYS_FUNC( send );
+	
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_send_func( socket,buffer,length,flags );
+	}
+	rpchook_t *lp = get_by_fd( socket );
+
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) )
+	{
+		return g_sys_send_func( socket,buffer,length,flags );
+	}
+	size_t wrotelen = 0;
+	int timeout = ( lp->write_timeout.tv_sec * 1000 ) 
+				+ ( lp->write_timeout.tv_usec / 1000 );
+
+	ssize_t writeret = g_sys_send_func( socket,buffer,length,flags );
+	if (writeret == 0)
+	{
+		return writeret;
+	}
+
+	if( writeret > 0 )
+	{
+		wrotelen += writeret;	
+	}
+	while( wrotelen < length )
+	{
+
+		struct pollfd pf = { 0 };
+		pf.fd = socket;
+		pf.events = ( POLLOUT | POLLERR | POLLHUP );
+		poll( &pf,1,timeout );
+
+		writeret = g_sys_send_func( socket,(const char*)buffer + wrotelen,length - wrotelen,flags );
+		
+		if( writeret <= 0 )
+		{
 			break;
 		}
 		wrotelen += writeret ;
@@ -537,6 +764,46 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags)
 }
 
 ssize_t recv( int socket, void *buffer, size_t length, int flags )
+{
+	HOOK_SYS_FUNC( recv );
+	
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_recv_func( socket,buffer,length,flags );
+	}
+	rpchook_t *lp = get_by_fd( socket );
+
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) ) 
+	{
+		return g_sys_recv_func( socket,buffer,length,flags );
+	}
+	int timeout = ( lp->read_timeout.tv_sec * 1000 ) 
+				+ ( lp->read_timeout.tv_usec / 1000 );
+
+	for(;;) {
+		struct pollfd pf = { 0 };
+		pf.fd = socket;
+		pf.events = ( POLLIN | POLLERR | POLLHUP );
+
+		int pollret = poll( &pf,1,timeout );
+
+		ssize_t readret = g_sys_recv_func( socket,buffer,length,flags );
+
+		if( readret < 0 )
+		{
+			if(TCP_NORMAL_ERR(errno)) {
+				continue;
+			}
+			co_log_err("CO_ERR: read fd %d ret %ld errno %d poll ret %d timeout %d",
+						socket,readret,errno,pollret,timeout);
+		}
+
+		return readret;
+
+	}
+}
+
+ssize_t recv1( int socket, void *buffer, size_t length, int flags )
 {
 	HOOK_SYS_FUNC( recv );
 	
@@ -702,6 +969,8 @@ int fcntl(int fildes, int cmd, ...)
 	return ret;
 }
 
+typedef void (*stCoSysEnvArr_free)();
+
 struct stCoSysEnv_t
 {
 	char *name;	
@@ -711,6 +980,7 @@ struct stCoSysEnvArr_t
 {
 	stCoSysEnv_t *data;
 	size_t cnt;
+	stCoSysEnvArr_free *envfree;
 };
 static stCoSysEnvArr_t *dup_co_sysenv_arr( stCoSysEnvArr_t * arr )
 {
@@ -723,6 +993,26 @@ static stCoSysEnvArr_t *dup_co_sysenv_arr( stCoSysEnvArr_t * arr )
 	}
 	return lp;
 }
+
+static void free_co_sysenv_arr( void *pvEnv )
+{
+	stCoSysEnv_t *e;
+	stCoSysEnvArr_t *arr = (stCoSysEnvArr_t*)pvEnv;
+
+	if(arr) {
+		for(size_t i = 0; i < arr->cnt; i++) {
+			e = &arr->data[i];
+			if(e->name)
+				free(e->name);
+			if(e->value)
+				free(e->value);
+		}
+		if(arr->data) 
+			free(arr->data);
+		free(arr);
+	}
+}
+
 
 static int co_sysenv_comp(const void *a, const void *b)
 {
@@ -754,7 +1044,7 @@ void co_set_env_list( const char *name[],size_t cnt)
 		stCoSysEnv_t *lq = g_co_sysenv.data + 1;
 		for(size_t i=1;i<g_co_sysenv.cnt;i++)
 		{
-			if( strcmp( lp->name,lq->name ) )
+			if( strcmp( lp->name,lq->name ) )	/* skynet里面也有这种算法，用于去重复 */
 			{
 				++lp;
 				if( lq != lp  )
@@ -780,6 +1070,7 @@ int setenv(const char *n, const char *value, int overwrite)
 			if( !self->pvEnv )
 			{
 				self->pvEnv = dup_co_sysenv_arr( &g_co_sysenv );
+				self->pvEnv_free = free_co_sysenv_arr;
 			}
 			stCoSysEnvArr_t *arr = (stCoSysEnvArr_t*)(self->pvEnv);
 
@@ -812,6 +1103,7 @@ int unsetenv(const char *n)
 			if( !self->pvEnv )
 			{
 				self->pvEnv = dup_co_sysenv_arr( &g_co_sysenv );
+				self->pvEnv_free = free_co_sysenv_arr;
 			}
 			stCoSysEnvArr_t *arr = (stCoSysEnvArr_t*)(self->pvEnv);
 
@@ -845,6 +1137,7 @@ char *getenv( const char *n )
 		if( !self->pvEnv )
 		{
 			self->pvEnv = dup_co_sysenv_arr( &g_co_sysenv );
+			self->pvEnv_free = free_co_sysenv_arr;
 		}
 		stCoSysEnvArr_t *arr = (stCoSysEnvArr_t*)(self->pvEnv);
 

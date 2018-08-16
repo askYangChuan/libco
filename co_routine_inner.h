@@ -21,6 +21,8 @@
 
 #include "co_routine.h"
 #include "coctx.h"
+#include "stlc_list.h"
+
 struct stCoRoutineEnv_t;
 struct stCoSpec_t
 {
@@ -29,7 +31,7 @@ struct stCoSpec_t
 
 struct stStackMem_t
 {
-	stCoRoutine_t* occupy_co;
+	stCoRoutine_t* occupy_co;		/* 当前使用该栈的协程 */
 	int stack_size;
 	char* stack_bp; //stack_buffer + stack_size
 	char* stack_buffer;
@@ -44,11 +46,12 @@ struct stShareStack_t
 	stStackMem_t** stack_array;
 };
 
-
+typedef void (*pvEnv_free_func_t)(void*);
 
 struct stCoRoutine_t
 {
-	stCoRoutineEnv_t *env;
+	struct stlc_list_head link;
+	stCoRoutineEnv_t *env;	/* 这个env就是当前线程的env，但实际上可能会垮线程调用的话就会变化 */
 	pfn_co_routine_t pfn;
 	void *arg;
 	coctx_t ctx;
@@ -60,6 +63,7 @@ struct stCoRoutine_t
 	char cIsShareStack;
 
 	void *pvEnv;
+	pvEnv_free_func_t pvEnv_free;
 
 	//char sRunStack[ 1024 * 128 ];
 	stStackMem_t* stack_mem;
@@ -68,7 +72,7 @@ struct stCoRoutine_t
 	//save satck buffer while confilct on same stack_buffer;
 	char* stack_sp; 
 	unsigned int save_size;
-	char* save_buffer;
+	char* save_buffer;		/* 当共享栈要被其他协程使用时，用于保存当前协程的栈 */
 
 	stCoSpec_t aSpec[1024];
 

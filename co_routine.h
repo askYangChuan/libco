@@ -88,5 +88,11 @@ stShareStack_t* co_alloc_sharestack(int iCount, int iStackSize);
 void co_set_env_list( const char *name[],size_t cnt);
 
 void co_log_err( const char *fmt,... );
+
+//9, co pool
+int stCoRoutine_pool_init();
+
+void stCoRoutine_pool_status();
+
 #endif
 

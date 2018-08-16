@@ -18,6 +18,9 @@
 
 #ifndef __CO_CLOSURE_H__
 #define __CO_CLOSURE_H__
+
+/* 这个头文件用于闭包操作，都是考宏来处理的，co_ref用于闭包，其实就是创建了一个类，并把传递的参数给存入到这个类里面了 */
+
 struct stCoClosure_t 
 {
 public:

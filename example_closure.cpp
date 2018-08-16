@@ -52,10 +52,10 @@ int main( int argc,char *argv[] )
 
 	int total = 100;
 	vector<int> v2;
-	co_ref( ref,total,v2,m);
+	co_ref( ref,total,v2,m);	/* co_ref就是将传递的参数封装到了一个类里面，并且定义了一个实例叫ref */
 	for(int i=0;i<10;i++)
 	{
-		co_func( f,ref,i )
+		co_func( f,ref,i )		/* 实现的是f这个类的exec()函数 */
 		{
 			printf("ref.total %d i %d\n",ref.total,i );
 			//lock
