@@ -1194,36 +1194,3 @@ stCoCondItem_t *co_cond_pop( stCoCond_t *link )
 	return p;
 }
 
-void co_pCallStack_cancel(stCoRoutine_t *co)
-{
-	if(co == NULL || co->env == NULL) 
-		return;
-	stCoRoutineEnv_t *env = co->env;
-	
-	for(int i = 0; i < env->iCallStackSize; i++) {
-		if(env->pCallStack[i] == co) {
-			for(int j = i; j < env->iCallStackSize-1;j++) {
-				env->pCallStack[j] = env->pCallStack[j+1];
-			}
-			break;
-		}
-	}
-}
-
-/* can't not cancel owner */
-void co_cancel(stCoRoutine_t *co)
-{
-	if(co == NULL)
-		return;
-
-	stCoRoutine_t *newco = GetCurrThreadCo();
-	if(co == newco) {
-		return;
-	}
-
-	co->cEnd = 1;
-	co_pCallStack_cancel(co);
-	stCoRoutine_release(co);
-}
-
-
