@@ -68,7 +68,6 @@ struct stCoRoutine_t
 	//char sRunStack[ 1024 * 128 ];
 	stStackMem_t* stack_mem;
 
-
 	//save satck buffer while confilct on same stack_buffer;
 	char* stack_sp; 
 	unsigned int save_size;

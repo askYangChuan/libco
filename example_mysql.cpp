@@ -75,7 +75,7 @@ int main(int argc,char *argv[])
 
 	stCoRoutine_t *co;
 
-	stCoRoutine_pool_init();
+	stCoRoutine_pool_start_gc();
 
 	stCoRoutineAttr_t attr;
 	attr.share_stack = co_alloc_sharestack(1, 1024 * 128);
