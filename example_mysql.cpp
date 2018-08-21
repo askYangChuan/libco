@@ -70,13 +70,6 @@ static void *poll_total( void *arg )
 	return NULL;
 }
 
-void *poll_wait_proc(void *args)
-{
-	co_enable_hook_sys();
-
-	poll(NULL, 0, 1000);
-}
-
 int main(int argc,char *argv[])
 {
 
@@ -90,8 +83,6 @@ int main(int argc,char *argv[])
 
 	co_create(&co, NULL, poll_total, NULL);
 	co_resume(co);
-
-	extest(&attr);
 
 	for(int i = 0; i < 1000*20; i++) {
 		co_create(&co, &attr, poll_routine, NULL);
